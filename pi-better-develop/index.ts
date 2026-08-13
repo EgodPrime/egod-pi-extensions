@@ -4,8 +4,9 @@
  * A pi extension that merges the old "dev-mode" and "pi-plan-mode" extensions
  * into one package with THREE mutually-exclusive work modes:
  *
- *   chat (default)  — READ-ONLY. Built-in edit/write are disabled; no write
- *                     capability at all. bash stays available (prompt-only).
+ *   chat (default)  — READ-ONLY. Built-in edit/write are disabled; bash stays
+ *                     available but is only discouraged (via system-prompt note,
+ *                     not enforced) from writing to disk.
  *   plan            — write access to ./.pi/plans/ ONLY, via a dedicated
  *                     `write_plan` tool (built-in edit/write stay disabled).
  *                     Injects the plan-mode context (assets/idea.md) so the
@@ -43,7 +44,6 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -54,73 +54,8 @@ const PLANS_DIR = ".pi/plans";
 
 const STATUS_ID = "pi-better-develop";
 
-// ---------------------------------------------------------------------------
-// bash 闸门白名单 (chat/plan 模式): 只放行白名单内的只读「查看」命令,
-// 未命中的命令直接 block(不再弹 UI 确认)。dev 模式全放行。
-// 判定层级: ① 写重定向/命令替换/多命令链接兜底; ② 命令名白名单(+ 逐段校验)。
-// ---------------------------------------------------------------------------
-
-// ① 写重定向/写操作符(无论命令名都拦)。排除 >= => -> 误报。
-const WRITE_OPERATOR_RE = /(?:^|[^\S\n]|[\s;&|()])\d*&?>>?(?![^\S\n]*[=>-])/;
-
-// ② 只读「查看」命令名白名单 —— 首段命令名(basename)必须在此集合。
-// 未命中的命令一律 block(不再弹 UI 确认);dev 模式全放行。
-const WHITELIST_CMDS = new Set([
-  // 目录/文件查看
-  "ls", "pwd", "find", "grep", "rg", "head", "tail", "wc", "stat", "file",
-  "tree", "du", "df", "more", "less", "cat", "sed",
-  // 系统/进程查看
-  "ps", "top", "uname", "whoami", "id", "env", "date", "which", "uptime",
-  "free", "echo", "command",
-]);
-
-// git 只读子命令(写子命令一律拦截)。
-const GIT_READONLY_SUBS = new Set([
-  "status", "log", "show", "diff", "branch", "remote", "ls-files",
-]);
-
-function firstTokenBasename(cmd: string): string {
-  const token = cmd.trim().split(/[\s;&|)]+/)[0];
-  return token.replace(/^.*\//, "").toLowerCase();
-}
-
-// per-command 安全校验: 白名单命令的额外限制(不在 switch 则直接看集合)。
-function commandTokenAllowed(name: string, cmd: string): boolean {
-  switch (name) {
-    case "git": {
-      const m = cmd.match(/^\s*git\s+(\S+)/i);
-      return !!m && GIT_READONLY_SUBS.has(m[1].toLowerCase());
-    }
-    case "sed": // 仅无 -i 的只读流处理/打印
-      return !/\s-i\b/.test(cmd);
-    default:
-      return WHITELIST_CMDS.has(name);
-  }
-}
-
-// 白名单判定(chat/plan 模式): 全过才 true,否则 block。
-// ① 严格段: 写重定向 / 命令替换($() 反引号) / 多命令链接(; && & ||) 任一命中 → false。
-// ② 管道 | 放行: 按 | 拆段,每段 trim,各自过「命令名白名单 + per-command 校验」。
-function isAllowed(cmd: string): boolean {
-  if (WRITE_OPERATOR_RE.test(cmd)) return false; // 写重定向
-  if (/\$\(|`/.test(cmd)) return false; // 命令替换 / 反引号
-  if (/[;&]|\|\|/.test(cmd)) return false; // 多命令链接 ; && & ||(单管道 | 除外)
-  const segs = cmd.split("|").map((s) => s.trim()).filter(Boolean);
-  if (segs.length === 0) return false;
-  for (const seg of segs) {
-    const name = firstTokenBasename(seg);
-    if (!commandTokenAllowed(name, seg)) return false;
-  }
-  return true;
-}
-
-function reflectReason(shown: string): string {
-  return `[已阻止] 你在 chat/plan（只读）模式下执行了不在白名单的 bash 命令:\n${shown}\n\n` +
-    `本模式只放行白名单内只读「查看」命令(如 ls cat pwd find grep rg head tail wc ` +
-    `stat file tree du df more less sed、git 只读子命令、ps 等系统查看),可用 | 管道组合。\n` +
-    `写操作与未列出的命令一律直接阻止,不再逐条询问。\n` +
-    `请反思——你是否误以为自己在 dev 模式？需要自由执行命令/写文件时，请告诉用户运行 /dev。`;
-}
+// chat/plan 模式不设代码级 bash 拦截:bash 可用,但通过系统提示注入约束,
+// 提醒 agent 不要用 bash 做写操作(见 CHAT_NOTE / PLAN_NOTE)。dev 模式全放行。
 
 type Mode = "chat" | "plan" | "dev";
 
@@ -267,18 +202,6 @@ It is a hard habit: never leave a plan file's Check-list, status, or deviation l
       note += "\n\n---\n" + planContext;
     }
     return { systemPrompt: event.systemPrompt + "\n\n" + note };
-  });
-
-  // ---- bash 闸门: chat/plan 模式下拦截写/危险命令, 需用户同意 --------------
-
-  pi.on("tool_call", (event) => {
-    if (mode === "dev") return; // dev 全放行
-    if (!isToolCallEventType("bash", event)) return;
-    const cmd = ((event.input as { command?: string }).command ?? "").trim();
-    if (!cmd || isAllowed(cmd)) return; // 命中白名单才放行, 未命中直接阻止
-
-    const shown = cmd.length > 80 ? cmd.slice(0, 80) + " …[已截断]" : cmd;
-    return { block: true, terminate: true, reason: reflectReason(shown) };
   });
 
   // ---- custom plan write tool (restricted to ./.pi/plans/) -----------------

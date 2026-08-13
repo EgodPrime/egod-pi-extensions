@@ -4,7 +4,7 @@
 
 | 模式 | 写权限 | 用途 |
 |------|--------|------|
-| **chat**(默认) | 无(只读) | 只读讨论/审阅;`edit`/`write` 禁用,`bash` 仅白名单只读命令 |
+| **chat**(默认) | 无(只读) | 只读讨论/审阅;`edit`/`write` 禁用,`bash` 可用但通过系统提示约束不写盘 |
 | **plan** | 仅 `./.pi/plans/` | 写计划文件;通过专属 `write_plan` 工具,内置 `edit`/`write` 仍禁用 |
 | **dev** | 全盘 | 完整开发;恢复内置 `edit`/`write` |
 
@@ -22,7 +22,7 @@
 - **每轮强制工具集对齐**:`before_agent_start` 按当前模式强制 `setActiveTools`,即使之前工具被清掉,/dev 或 /plan 一开下一轮立刻恢复对应写能力。
 - **checklist 回填提醒**:plan 上下文(`assets/idea.md`)强制每个计划文件携带完整《检查清单》并随时与正文/状态同步;dev 模式每轮注入 `CHECKLIST_NOTE`,提醒实现/修订后回填对应计划文件的检查清单、状态与偏离记录,避免 checklist 陈旧。
 - **plan 只写 plans 目录**:`write_plan` 后端做路径 resolve + containment 校验,越界/穿越(`..`)路径直接拒绝,写权限真正锁死在 `./.pi/plans/`。
-- **bash 白名单闸门**(chat/plan):只放行只读「查看」命令(`ls/cat/pwd/find/grep/rg/head/tail/wc/stat/file/tree/du/df/more/less/sed`、`git` 只读子命令、`ps` 等系统查看),支持 `|` 管道按段各自校验组合;写重定向、命令替换、`;`/`&&`/`||` 与未列出的命令一律**直接 block** **不再弹 UI 请示**。dev 模式全放行。
+- **bash 不做代码级拦截**(chat/plan):不再用命令白名单硬 block。`bash` 在三种模式下均可自由使用;但 chat/plan 每轮通过系统提示(`CHAT_NOTE`/`PLAN_NOTE`)提醒 agent **不要用 bash 做写操作**(`>`,`>>`,`rm`,`mv`,`sed -i`,`git commit` 等),软约束靠模型遵循,不强制拦截。dev 模式全放行。
 - **状态仅会话内生效**:新会话/恢复/分叉一律回到默认 chat(只读)。
 - 底部状态栏三态:`⏸ chat (read-only)` / `📋 plan` / `⚒ dev`。
 
