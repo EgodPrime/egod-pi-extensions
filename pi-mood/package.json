@@ -1,0 +1,13 @@
+{
+  "name": "pi-mood",
+  "version": "0.1.0",
+  "private": true,
+  "description": "pi extension: an 'emotional value' companion that, after each turn, has the AI generate one short witty/teasing/encouraging line about the user's recent behavior, shown at the far right of the footer — fully isolated from the session context.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.typecheck.json"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
