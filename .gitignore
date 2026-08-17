@@ -2,3 +2,5 @@ node_modules/
 .typecheck/
 *.log
 .DS_Store
+.pi/
+AGENTS.md
