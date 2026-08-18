@@ -13,7 +13,7 @@
  *   - 所有 LLM 调用走 ctx.modelRegistry.complete 旁路,独立 sessionId,不写主对话。
  *   - items 为权威源(便于 lint 溯源),profile.* 为派生视图(供展示/注入),写时同步。
  *   - lint 冲突解决:LLM 调和为主;不可用/失败走确定性兜底(去重合并 + 新取胜 + 标 pending)。
- *   - 长度硬上限 MAX_PROFILE_TOKENS;超限先复用/生成压缩缓存;仍超则禁用注入并提示。
+ *   - 长度:压缩目标 MAX_PROFILE_TOKENS=700;不使用(禁用注入)阈值 INJECT_LIMIT_TOKENS=1024。注入≤1024 直接可用;超 1024 先复用/生成压缩缓存(产物须≤700);仍无法达标则禁用注入并提示。
  *
  * 安装: ~/.pi/agent/extensions/ 或 .pi/extensions/ 后 /reload。
  * 用法:
@@ -41,7 +41,8 @@ const POLL_MS = 60 * 1000; // 节流轮询间隔
 const LLM_TIMEOUT_MS = 45 * 1000; // 旁路 LLM 调用硬超时, 防止 summarize/lint/compress 永久挂起
 const SIGNAL_TRIM = 240; // 每条用户发言样本最大字符数
 const REPLY_TRIM = 600; // assistant 回复样本最大字符数
-const MAX_PROFILE_TOKENS = 700; // 注入上下文硬上限
+const MAX_PROFILE_TOKENS = 700; // 压缩目标: 压缩产物必须 ≤700;也作为实体精简/画像体预算
+const INJECT_LIMIT_TOKENS = 1024; // 不使用阈值: 注入文本 ≤1024 直接用原始, 超 1024 才压缩; 压缩仍不达标则禁用注入
 const ITEM_MAX = 60; // 每类条目上限
 const DEDUP_SIM = 0.55; // 实体精简: 同 key 近义合并的 bigram 相似度阈值
 const STATUS_ID = "pi-user-profile";
@@ -379,8 +380,8 @@ function slimProfile(p: UserProfile, budgetTokens: number): number {
 function effectiveInjection(p: UserProfile): { text: string; tokens: number } {
   const full = buildInjection(p);
   const fullTokens = estimateTokens(full);
-  if (fullTokens <= MAX_PROFILE_TOKENS) return { text: full, tokens: fullTokens };
-  if (p.lint.compressed && p.lint.compressedHash === itemsHash(p.items)) {
+  if (fullTokens <= INJECT_LIMIT_TOKENS) return { text: full, tokens: fullTokens }; // ≤1024 直接用原始(full>700 也容忍, 不过度压缩)
+  if (p.lint.compressed && p.lint.compressedHash === itemsHash(p.items) && estimateTokens(p.lint.compressed) <= MAX_PROFILE_TOKENS) {
     return { text: p.lint.compressed, tokens: estimateTokens(p.lint.compressed) };
   }
   return { text: full, tokens: fullTokens };
@@ -779,8 +780,8 @@ async function runLint(ctx: ExtensionContext, opts: { auto?: boolean } = {}): Pr
     const injection = buildInjection(p);
     const tokens = estimateTokens(injection);
     p.lint.tokens = tokens;
-    if (tokens > MAX_PROFILE_TOKENS) {
-      issues.push(`注入上下文约 ${tokens} tokens,超过上限 ${MAX_PROFILE_TOKENS},需压缩`);
+    if (tokens > INJECT_LIMIT_TOKENS) {
+      issues.push(`注入上下文约 ${tokens} tokens,超过不使用阈值 ${INJECT_LIMIT_TOKENS},需压缩`);
     }
 
     // 清理结构 lint 里可能产生的过期压缩缓存(如条目已变)
@@ -795,8 +796,8 @@ async function runLint(ctx: ExtensionContext, opts: { auto?: boolean } = {}): Pr
     p.lastLintedAt = new Date().toISOString();
     await saveProfile(p);
 
-    // ⑤ lint 时自动压缩: 实体精简后仍未到限内, 则刷新压缩缓存供注入使用
-    if (tokens > MAX_PROFILE_TOKENS) {
+    // ⑤ lint 时自动压缩: 实体精简后仍超不使用阈值, 则刷新压缩缓存供注入使用
+    if (tokens > INJECT_LIMIT_TOKENS) {
       const c = await compressProfile(ctx, p);
       if (c) fixed.push("已自动刷新压缩缓存");
     }
@@ -811,12 +812,12 @@ async function runLint(ctx: ExtensionContext, opts: { auto?: boolean } = {}): Pr
 // 压缩(生成注入用压缩摘要缓存)
 // ---------------------------------------------------------------------------
 
-const COMPRESS_SYSTEM = `你是用户画像压缩助手。把「完整画像」压缩为一段不长于约 500 tokens 的画像描述,同时尽量保留关键偏好/风格/沟通要点。
+const COMPRESS_SYSTEM = `你是用户画像压缩助手。把「完整画像」压缩为一段不长于约 700 tokens 的画像描述,同时尽量保留关键偏好/风格/沟通要点。
 - 输出纯文本(可含简短 bullet),不要 markdown 标题,不要前后缀,不要 JSON。`;
 
 async function compressProfile(ctx: ExtensionContext, p: UserProfile): Promise<string | undefined> {
   const full = buildInjection(p);
-  if (estimateTokens(full) <= MAX_PROFILE_TOKENS) {
+  if (estimateTokens(full) <= INJECT_LIMIT_TOKENS) { // ≤1024 直接用原始, 无需压缩
     p.lint.compressed = undefined;
     p.lint.compressedHash = undefined;
     await saveProfile(p);
@@ -838,10 +839,10 @@ async function compressProfile(ctx: ExtensionContext, p: UserProfile): Promise<s
 /** 注入前长度硬校验:返回可直接注入的文本,超限且无法压缩则返回 null(禁用注入)。 */
 async function ensureInjectionReady(ctx: ExtensionContext, p: UserProfile): Promise<string | null> {
   const full = buildInjection(p);
-  if (estimateTokens(full) <= MAX_PROFILE_TOKENS) return full;
-  // 复用有效压缩缓存
+  if (estimateTokens(full) <= INJECT_LIMIT_TOKENS) return full; // ≤1024 直接用原始
+  // 复用有效压缩缓存(产物须≤700)
   const h = itemsHash(p.items);
-  if (p.lint.compressed && p.lint.compressedHash === h) return p.lint.compressed;
+  if (p.lint.compressed && p.lint.compressedHash === h && estimateTokens(p.lint.compressed) <= MAX_PROFILE_TOKENS) return p.lint.compressed;
   // 未缓存 → 异步生成压缩,本次禁用注入,避免阻塞回合
   void compressProfile(ctx, p);
   return null;
@@ -861,7 +862,7 @@ function renderStatus(ctx: ExtensionContext, p: UserProfile | undefined): void {
     return;
   }
   const eff = effectiveInjection(p);
-  const over = eff.tokens > MAX_PROFILE_TOKENS;
+  const over = eff.tokens > INJECT_LIMIT_TOKENS; // over ⚠ 以不使用阈值 1024 为准
   ctx.ui.setStatus(
     STATUS_ID,
     ctx.ui.theme.fg(
