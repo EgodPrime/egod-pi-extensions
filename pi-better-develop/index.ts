@@ -135,10 +135,35 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  /** One-sentence reminder label per mode, used for the switch-time hard reminder. */
+  function modeLabel(m: Mode): string {
+    return m === "dev"
+      ? "dev（全写权限）"
+      : m === "plan"
+        ? "plan（仅可写 .pi/plans）"
+        : "chat（只读）";
+  }
+
   function setMode(ctx: ExtensionContext, next: Mode): void {
+    const changed = mode !== next;
     mode = next;
     applyModeTools(next);
     updateStatus(ctx);
+    if (changed) {
+      // Hard reminder: silently queue a one-shot user-visible context message so
+      // it lands at maximum recency in the next agent turn. deliverAs "nextTurn"
+      // means no forced extra turn / no extra tokens. Complements the per-turn
+      // MODE_NOTE injected into the system prompt (belt & suspenders), fighting
+      // stale-mode residue after rapid chat->plan->dev->plan->dev switching.
+      pi.sendMessage(
+        {
+          customType: "pi-better-develop/mode",
+          content: `[模式切换硬提醒] 你现在处于 ${modeLabel(next)} 模式。`,
+          display: true,
+        },
+        { deliverAs: "nextTurn" },
+      );
+    }
   }
 
   pi.registerCommand("chat", {

@@ -19,6 +19,7 @@
 ## 行为说明
 
 - **每轮注入权威模式标记到系统提示**:系统提示每轮重建,只保留一条**始终反映当前状态**的标记,`/chat` 后旧模式不会再残留——模型不会继续以旧模式自居。
+- **切模式时静默注入硬提醒消息**:`/dev` `/plan` `/chat` 在模式**实际切换**时,用 `pi.sendMessage({deliverAs:"nextTurn"})` 排入一条一句话「你已经进入 dev/plan/chat 模式」到 LLM 上下文,在下一次 agent 回合以最高新鲜度送达(不触发额外回合、不额外耗 token),与每回合的系统提示 MODE_NOTE 叠加双保险,对抗快速 `chat→plan→dev→plan→dev` 切换后的残留误判。
 - **每轮强制工具集对齐**:`before_agent_start` 按当前模式强制 `setActiveTools`,即使之前工具被清掉,/dev 或 /plan 一开下一轮立刻恢复对应写能力。
 - **checklist 回填提醒**:plan 上下文(`assets/idea.md`)强制每个计划文件携带完整《检查清单》并随时与正文/状态同步;dev 模式每轮注入 `CHECKLIST_NOTE`,提醒实现/修订后回填对应计划文件的检查清单、状态与偏离记录,避免 checklist 陈旧。
 - **plan 只写 plans 目录**:`write_plan` 后端做路径 resolve + containment 校验,越界/穿越(`..`)路径直接拒绝,写权限真正锁死在 `./.pi/plans/`。
