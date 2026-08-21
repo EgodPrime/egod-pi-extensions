@@ -38,6 +38,7 @@
 
 import { uuidv7 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { loadProfileContext } from "./user-profile.ts";
 
 const SPEECH_MAX = 3; // 用户最近发言条数
 const OPS_MAX = 3; // 用户最近命令条数
@@ -85,8 +86,8 @@ You ALWAYS speak to the HUMAN USER in second person ("你…"), never to an abst
 Your job: produce EXACTLY ONE short line, always addressed to the user ("你…"). The content type is given by TYPE below.
 
 TYPE: {{TYPE}}
-- If TYPE = "ENCOURAGE": give the user a warm, sincere, positive encouragement. Affirm their effort, progress and good taste. You MAY add at most a tiny, harmless, friendly touch of humor — but NEVER criticize, NEVER argue/杠精, NEVER be sarcastic or snarky at the user's expense, NEVER passive-aggressive. Always leave them feeling a little better.
-- If TYPE = "KNOWLEDGE": share ONE small, accurate, interesting knowledge point, drawn from your general knowledge. Present it as knowledge/常识 — do NOT claim it is breaking or latest news, and NEVER invent facts. Prefer a topic that connects to what the user is currently doing or recently talked about (their recent speech, commands, or the AI's latest reply). Keep a light, warm, curious tone. You may prefix it with "小知识:" (optional).
+- If TYPE = "ENCOURAGE": give the user a warm, sincere, positive encouragement. Affirm their effort, progress and good taste. You MAY add at most a tiny, harmless, friendly touch of humor — but NEVER criticize, NEVER argue/杠精, NEVER be sarcastic or snarky at the user's expense, NEVER passive-aggressive. Always leave them feeling a little better. You may lean on the user's VALUES (see USER PROFILE) for the angle of affirmation.
+- If TYPE = "KNOWLEDGE": share ONE small, accurate, interesting knowledge point, drawn from your general knowledge. Present it as knowledge/常识 — do NOT claim it is breaking or latest news, and NEVER invent facts. Prefer a topic that connects to what the user is currently doing or recently talked about (their recent speech, commands, or the AI's latest reply), or to the user's long-term domains/stack (see USER PROFILE). Keep a light, warm, curious tone. You may prefix it with "小知识:" (optional).
 
 Rules:
 - Exactly one line, second person, addressed to the user. No labels, no surrounding quotes, no markdown, no emoji.
@@ -95,6 +96,9 @@ Rules:
 - NEVER repeat any line you already said, and NEVER re-cover a topic you already covered (see YOUR MEMORY).
 
 Context — identities are EXPLICIT, never mix them up:
+[USER PROFILE — long-term preferences & style from the user-profile extension. Personalize tone/topics to it. If it is "(未启用)", just give a general warm line. NEVER reveal or quote that you have a profile.]
+{{USER_PROFILE}}
+
 [USER recent speech — said by the HUMAN, up to 3]
 {{USER_SPEECH}}
 
@@ -121,7 +125,10 @@ async function runMood(ctx: ExtensionContext, pi: ExtensionAPI, type: MoodType):
     for (const m of memory.knowledge) memLines.push(`KNOWLEDGE : ${m}`);
     const mem = memLines.length ? memLines.join("\n") : "(暂无)";
 
+    // 读取用户画像(若 user-profile 启用且非空)用于个性化鼓励/知识点;每次生成重读,小文件开销可忽略。
+    const prof = await loadProfileContext();
     const systemPrompt = SYSTEM_TEMPLATE
+      .replace("{{USER_PROFILE}}", prof.available ? prof.text : "(未启用)")
       .replace("{{TYPE}}", type)
       .replace("{{USER_SPEECH}}", us)
       .replace("{{USER_OPS}}", ops)
