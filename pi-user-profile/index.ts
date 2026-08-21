@@ -13,7 +13,7 @@
  *   - 所有 LLM 调用走 ctx.modelRegistry.complete 旁路,独立 sessionId,不写主对话。
  *   - items 为权威源(便于 lint 溯源),profile.* 为派生视图(供展示/注入),写时同步。
  *   - lint 冲突解决:LLM 调和为主;不可用/失败走确定性兜底(去重合并 + 新取胜 + 标 pending)。
- *   - 长度:压缩目标 MAX_PROFILE_TOKENS=700;不使用(禁用注入)阈值 INJECT_LIMIT_TOKENS=1024。注入≤1024 直接可用;超 1024 先复用/生成压缩缓存(产物须≤700);仍无法达标则禁用注入并提示。
+ *   - 长度:压缩目标 MAX_PROFILE_TOKENS=700;不使用(禁用注入)阈值 INJECT_LIMIT_TOKENS=1024。注入≤1024 直接可用(实体精简预算同为其对齐,不误删);超 1024 先复用/生成压缩缓存(产物须≤700);仍无法达标则禁用注入并提示。
  *
  * 安装: ~/.pi/agent/extensions/ 或 .pi/extensions/ 后 /reload。
  * 用法:
@@ -41,8 +41,8 @@ const POLL_MS = 60 * 1000; // 节流轮询间隔
 const LLM_TIMEOUT_MS = 45 * 1000; // 旁路 LLM 调用硬超时, 防止 summarize/lint/compress 永久挂起
 const SIGNAL_TRIM = 240; // 每条用户发言样本最大字符数
 const REPLY_TRIM = 600; // assistant 回复样本最大字符数
-const MAX_PROFILE_TOKENS = 700; // 压缩目标: 压缩产物必须 ≤700;也作为实体精简/画像体预算
-const INJECT_LIMIT_TOKENS = 1024; // 不使用阈值: 注入文本 ≤1024 直接用原始, 超 1024 才压缩; 压缩仍不达标则禁用注入
+const MAX_PROFILE_TOKENS = 700; // 压缩目标: 压缩产物必须 ≤700
+const INJECT_LIMIT_TOKENS = 1024; // 不使用阈值: 注入文本 ≤1024 直接用原始, 超 1024 才压缩; 压缩仍不达标则禁用注入。实体精简预算也与此对齐
 const ITEM_MAX = 60; // 每类条目上限
 const DEDUP_SIM = 0.55; // 实体精简: 同 key 近义合并的 bigram 相似度阈值
 const STATUS_ID = "pi-user-profile";
@@ -82,7 +82,7 @@ interface UserProfile {
     conflictsResolved: number;
     lastIssues: string[];
     compressed?: string;
-    compressedHash?: string;
+    compressedHash?: string; // 压缩缓存指纹 = injectionHash(items+summary)
   };
 }
 
@@ -308,12 +308,17 @@ function buildInjection(p: UserProfile): string {
   return parts.join("\n\n");
 }
 
-/** 由 items 生成一个稳定的校验哈希,用于判断压缩缓存是否过期。 */
+/** 由 items 生成一个稳定的校验哈希,用于判断压缩缓存是否过期(items 指纹)。 */
 function itemsHash(items: ProfileItem[]): string {
   return items
     .map((i) => `${i.key}:${normalize(i.text)}`)
     .sort()
     .join("|");
+}
+
+/** 注入内容指纹 = items + summary。压缩缓存 embed 了 summary,失效判断须涵盖它。 */
+function injectionHash(p: UserProfile): string {
+  return `${itemsHash(p.items)}|s:${normalize(p.summary || "")}`;
 }
 
 /**
@@ -381,7 +386,7 @@ function effectiveInjection(p: UserProfile): { text: string; tokens: number } {
   const full = buildInjection(p);
   const fullTokens = estimateTokens(full);
   if (fullTokens <= INJECT_LIMIT_TOKENS) return { text: full, tokens: fullTokens }; // ≤1024 直接用原始(full>700 也容忍, 不过度压缩)
-  if (p.lint.compressed && p.lint.compressedHash === itemsHash(p.items) && estimateTokens(p.lint.compressed) <= MAX_PROFILE_TOKENS) {
+  if (p.lint.compressed && p.lint.compressedHash === injectionHash(p) && estimateTokens(p.lint.compressed) <= MAX_PROFILE_TOKENS) {
     return { text: p.lint.compressed, tokens: estimateTokens(p.lint.compressed) };
   }
   return { text: full, tokens: fullTokens };
@@ -471,24 +476,48 @@ async function llmCall(
   }
 }
 
-/** 从 LLM 输出中尽力提取 JSON 对象。 */
+/** 从 LLM 输出中尽力提取 JSON 对象/数组。 */
 function extractJson<T>(text: string): T | undefined {
-  const cleaned = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-  try {
-    return JSON.parse(cleaned) as T;
-  } catch {
-    // 尝试找第一个 { 到最后一个 }
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(cleaned.slice(start, end + 1)) as T;
-      } catch {
-        return undefined;
+  const cleaned = text
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+  // 候选按「起始出现位置」排序: 规范输出优先整体解析, 附带解释时取最先出现的容器。
+  const candidates: { start: number; raw: string }[] = [{ start: 0, raw: cleaned }];
+  // 按容器配对截取: 对象 {} 与 数组 [] 各试一次(用平衡扫描而非 lastIndexOf, 避免嵌套/解释段切错)。
+  for (const [open, close] of [["{", "}"], ["[", "]"]]) {
+    const start = cleaned.indexOf(open);
+    if (start < 0) continue;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    let end = -1;
+    for (let i = start; i < cleaned.length; i++) {
+      const ch = cleaned[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === "\\") esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === open) depth++;
+      else if (ch === close) {
+        depth--;
+        if (depth === 0) { end = i; break; }
       }
     }
-    return undefined;
+    if (end > start) candidates.push({ start, raw: cleaned.slice(start, end + 1) });
   }
+  candidates.sort((a, b) => a.start - b.start);
+  for (const c of candidates) {
+    try {
+      return JSON.parse(c.raw) as T;
+    } catch {
+      // 尝试下一候选
+    }
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -636,20 +665,21 @@ function conflictGroups(items: ProfileItem[]): ProfileItem[][] {
     const placed = new Set<number>();
     for (let i = 0; i < list.length; i++) {
       if (placed.has(i)) continue;
-      const cluster: ProfileItem[] = [list[i]];
+      const clusterIdx: number[] = [i];
       for (let j = i + 1; j < list.length; j++) {
         if (placed.has(j)) continue;
         const a = normalize(list[i].text);
         const b = normalize(list[j].text);
         if ((a && b && (similarity(a, b) > 0.85 || isContradiction(list[i].text, list[j].text))) || a === b) {
-          cluster.push(list[j]);
+          clusterIdx.push(j);
           placed.add(j);
         }
-        if (cluster.length >= 4) break;
+        if (clusterIdx.length >= 4) break;
       }
-      if (cluster.length > 1) {
-        groups.push(cluster);
-        for (const c of cluster) placed.add(list.indexOf(c));
+      if (clusterIdx.length > 1) {
+        // 用记录的下标而不是 list.indexOf 反查(去掉 O(n²) 冗余扫描)
+        for (const m of clusterIdx) placed.add(m);
+        groups.push(clusterIdx.map((m) => list[m]));
       }
     }
   }
@@ -772,8 +802,9 @@ async function runLint(ctx: ExtensionContext, opts: { auto?: boolean } = {}): Pr
     issues.push(...conflict.issues);
     p.lint.conflictsResolved += conflict.conflictsResolved;
 
-    // ③ 实体精简: 同 key 放宽阈值近义合并 + token 预算裁剪, 真正把画像本体压到限内
-    const slimmed = slimProfile(p, MAX_PROFILE_TOKENS);
+    // ③ 实体精简: 同 key 放宽阈值近义合并 + token 预算裁剪, 把画像压到不使用阈值(1024)内。
+    //    预算对齐 INJECT_LIMIT_TOKENS, 避免在 700~1024 段(原样可注入)误删用户数据。
+    const slimmed = slimProfile(p, INJECT_LIMIT_TOKENS);
     if (slimmed > 0) fixed.push(`实体精简: 移除/合并 ${slimmed} 条多余条目`);
 
     // ④ 长度:估算注入文本大小(精简后)
@@ -784,8 +815,8 @@ async function runLint(ctx: ExtensionContext, opts: { auto?: boolean } = {}): Pr
       issues.push(`注入上下文约 ${tokens} tokens,超过不使用阈值 ${INJECT_LIMIT_TOKENS},需压缩`);
     }
 
-    // 清理结构 lint 里可能产生的过期压缩缓存(如条目已变)
-    const h = itemsHash(p.items);
+    // 清理结构 lint 里可能产生的过期压缩缓存(如条目/摘要已变)
+    const h = injectionHash(p);
     if (p.lint.compressedHash && p.lint.compressedHash !== h) {
       p.lint.compressed = undefined;
       p.lint.compressedHash = undefined;
@@ -824,14 +855,14 @@ async function compressProfile(ctx: ExtensionContext, p: UserProfile): Promise<s
     return undefined;
   }
   // 复用有效压缩缓存, 避免每次强制发起 LLM 调用 —— 这正是 compress 卡死的根源之一。
-  const h = itemsHash(p.items);
+  const h = injectionHash(p);
   if (p.lint.compressed && p.lint.compressedHash === h) return p.lint.compressed;
   const r = await llmCall(ctx, COMPRESS_SYSTEM, full.slice(0, 8000));
   if (!r.ok || !r.text) return undefined;
   const compressed = `## 用户画像(User Profile)(压缩)\n\n${r.text.trim().slice(0, 2000)}`;
   if (estimateTokens(compressed) > MAX_PROFILE_TOKENS) return undefined;
   p.lint.compressed = compressed;
-  p.lint.compressedHash = itemsHash(p.items);
+  p.lint.compressedHash = injectionHash(p);
   await saveProfile(p);
   return compressed;
 }
@@ -841,7 +872,7 @@ async function ensureInjectionReady(ctx: ExtensionContext, p: UserProfile): Prom
   const full = buildInjection(p);
   if (estimateTokens(full) <= INJECT_LIMIT_TOKENS) return full; // ≤1024 直接用原始
   // 复用有效压缩缓存(产物须≤700)
-  const h = itemsHash(p.items);
+  const h = injectionHash(p);
   if (p.lint.compressed && p.lint.compressedHash === h && estimateTokens(p.lint.compressed) <= MAX_PROFILE_TOKENS) return p.lint.compressed;
   // 未缓存 → 异步生成压缩,本次禁用注入,避免阻塞回合
   void compressProfile(ctx, p);
@@ -986,25 +1017,26 @@ async function runFigureme(ctx: ExtensionCommandContext): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 async function handleProfileCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
-  const arg = " " + String(args ?? "").trim().toLowerCase() + " ";
+  const trimmed = String(args ?? "").trim();
+  const cmd = trimmed.split(/\s+/)[0]?.toLowerCase() ?? "";
 
   const p = await loadProfile();
 
-  if (arg.includes(" off")) {
+  if (cmd === "off") {
     p.enabled = false;
     await saveProfile(p);
     renderStatus(ctx, p);
     ctx.ui.notify("用户画像已关闭(不再自动总结与注入)。", "info");
     return;
   }
-  if (arg.includes(" on")) {
+  if (cmd === "on") {
     p.enabled = true;
     await saveProfile(p);
     renderStatus(ctx, p);
     ctx.ui.notify("用户画像已开启。", "info");
     return;
   }
-  if (arg.includes(" reset")) {
+  if (cmd === "reset") {
     const ok = ctx.hasUI
       ? await ctx.ui.confirm("确认清空用户画像与缓冲?", "此操作不可撤销。")
       : true;
@@ -1018,15 +1050,15 @@ async function handleProfileCommand(args: string, ctx: ExtensionCommandContext):
     ctx.ui.notify("用户画像与缓冲已清空。", "info");
     return;
   }
-  if (arg.includes(" lint")) {
+  if (cmd === "lint") {
     ctx.ui.notify("正在 lint…", "info");
     const r = await runLint(ctx);
     if (r.usedLLM) ctx.ui.notify(`lint 完成:调和 ${r.conflictsResolved} 组冲突(LLM)` + (r.issues.length ? `,${r.issues.length} 项待处理` : ""), "info");
     else ctx.ui.notify(`lint 完成:修复 ${r.fixed.length} 项` + (r.issues.length ? `,${r.issues.length} 项待处理` : ""), r.ok ? "info" : "warning");
     return;
   }
-  if (arg.includes(" compress")) {
-    const h = itemsHash(p.items);
+  if (cmd === "compress") {
+    const h = injectionHash(p);
     if (p.lint.compressed && p.lint.compressedHash === h) {
       ctx.ui.notify("压缩缓存已存在且有效, 直接复用, 无需重新生成。", "info");
       return;
@@ -1036,7 +1068,7 @@ async function handleProfileCommand(args: string, ctx: ExtensionCommandContext):
     ctx.ui.notify(c ? "已生成压缩摘要缓存。" : "当前画像未超限或压缩失败。", c ? "info" : "warning");
     return;
   }
-  if (arg.includes(" status")) {
+  if (cmd === "status") {
     const signals = await loadSignals();
     const issues = (p.lint.lastIssues || []).length;
     const eff = effectiveInjection(p);
@@ -1049,9 +1081,9 @@ async function handleProfileCommand(args: string, ctx: ExtensionCommandContext):
     );
     return;
   }
-  if (arg.includes(" edit ")) {
+  if (cmd === "edit" && trimmed.match(/^edit\s+\w+\s+\S/)) {
     // /profile edit <key> <text>
-    const m = String(args).match(/^edit\s+(\w+)\s+(.+)$/s);
+    const m = trimmed.match(/^edit\s+(\w+)\s+(.+)$/s);
     if (!m) {
       ctx.ui.notify("用法: /profile edit <key> <text> (key ∈ language|domains|preferences|workStyle|communication|values|avoid)", "warning");
       return;

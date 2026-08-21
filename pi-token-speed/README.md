@@ -23,21 +23,16 @@ current **generation speed (tokens/second)** as an extra item in the footer stat
 
 ## Install
 
+Install globally (applies to all projects):
+
 ```
-mkdir -p ~/.pi/agent/extensions
-cp index.ts ~/.pi/agent/extensions/token-speed.ts
+pi install /absolute/path/to/pi-token-speed
 ```
 
-Then run `/reload` in pi (auto-discovery loads `.pi/agent/extensions/*.ts`).
+Then run `/reload` in pi to load it (later code changes are hot-reloaded via `/reload` too).
 
 To type-check while developing:
 
 ```
 npm run typecheck
-```
-
-## Test directly
-
-```
-pi -e ./index.ts
 ```

@@ -28,23 +28,13 @@
 
 ## 使用方式
 
-**方式 A:直接测试(不用安装)**
+全局安装(对所有项目生效):
 
 ```bash
-pi -e ./index.ts
+pi install /absolute/path/to/pi-better-develop
 ```
 
-**方式 B:自动发现(推荐)**
-
-把 `index.ts` 放到自动发现目录,然后 `/reload`:
-- 全局:`~/.pi/agent/extensions/`
-- 项目本地:`.pi/extensions/`
-
-**方式 C:作为 pi 包安装**
-
-```bash
-pi install /home/egod/Projects/pi-better-develop
-```
+装好后进入 pi 交互界面,运行 `/reload` 生效(之后改代码也可 `/reload` 热加载)。
 
 安装后建议移除旧的 `dev-mode` 与 `pi-plan-mode` 两个安装(见「替换旧扩展」)。
 

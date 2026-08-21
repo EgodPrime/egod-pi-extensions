@@ -15,10 +15,13 @@
 
 ## 安装
 
-把 `index.ts`(或其所在目录)放到以下位置之一,然后 `/reload`:
+全局安装(对所有项目生效):
 
-- 全局(所有项目):`~/.pi/agent/extensions/`
-- 项目内:`.pi/extensions/`
+```bash
+pi install /absolute/path/to/pi-user-profile
+```
+
+装好后进入 pi 交互界面,运行 `/reload` 生效(之后改代码也可 `/reload` 热加载)。
 
 数据文件(`~/.pi/agent/extensions_data/pi-user-profile/`,顶层受 `PI_CODING_AGENT_DIR` 覆盖;目录规范为 agentDir/extensions_data/拓展名,首个写入自动创建):
 - `user-profile.json` — 画像本体
@@ -45,7 +48,7 @@
 
 - 画像由你的对话内容归纳,默认开启。
 - **所有数据只存储在本机** `~/.pi/agent/extensions_data/pi-user-profile/` 下,不外发、不云同步。
-- 可随时 `/profile view` 查看、`/profile reset` 清空、`/profile off` 关闭。
+- 可随时 `/profile` 查看、`/profile reset` 清空、`/profile off` 关闭。
 
 ## 设计取舍
 
