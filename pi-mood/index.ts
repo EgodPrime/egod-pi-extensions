@@ -34,6 +34,7 @@
  *   /mood knowledge        立即讲一个小知识点
  *   /mood off|on           关闭/开启(关闭时定时陪伴暂停)
  *   /mood memory           列出当前独立记忆(按类型分类)
+ *   /mood profile          查看当前注入的画像块(未启用则提示)
  */
 
 import { uuidv7 } from "@earendil-works/pi-ai";
@@ -276,7 +277,7 @@ export default function (pi: ExtensionAPI) {
   // ---- 手动命令 -----------------------------------------------------------
 
   pi.registerCommand("mood", {
-    description: "情绪管家: /mood 随机(鼓励/知识); /mood encourage|knowledge 指定; /mood off|on 开关; /mood memory 查记忆",
+    description: "情绪管家: /mood 随机(鼓励/知识); /mood encourage|knowledge 指定; /mood off|on 开关; /mood memory 查记忆; /mood profile 查看注入的画像",
     handler: async (args, ctx) => {
       const arg = String(args ?? "").trim().toLowerCase();
       if (arg === "off") {
@@ -302,6 +303,12 @@ export default function (pi: ExtensionAPI) {
         for (let i = memory.knowledge.length - 1; i >= 0; i--) items.push(`💡 ${memory.knowledge[i]}`);
         for (let i = memory.encourage.length - 1; i >= 0; i--) items.push(`🤍 ${memory.encourage[i]}`);
         await ctx.ui.select(`独立记忆 (共 ${total} 条) 💡知识点 / 🤍鼓励`, items);
+        return;
+      }
+      if (arg === "profile") {
+        const p = await loadProfileContext();
+        const body = p.available ? `${p.tokens} tokens\n${p.text}` : "(未启用:未装 / 已关闭 / 空画像)";
+        ctx.ui.notify(`当前注入的画像块:\n${body}`, "info");
         return;
       }
       // arg === "encourage" | "knowledge" | 空 → 立即指定或随机来一句
