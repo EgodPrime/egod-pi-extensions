@@ -12,7 +12,7 @@
 
 | 命令 | 作用 |
 |------|------|
-| `/chat` | 进入只读 chat 模式;**从 dev 或 plan 退出都走它**(替代旧 `/devoff` 与 `/plan end`) |
+| `/chat` | 进入只读 chat 模式;从 dev 或 plan 退出都走它 |
 | `/plan` | 进入 plan 模式(仅可写 `.pi/plans/`);注入 idea.md 计划上下文 |
 | `/dev` | 进入 dev 模式(全写权限) |
 
@@ -36,26 +36,15 @@ pi install /absolute/path/to/pi-better-develop
 
 装好后进入 pi 交互界面,运行 `/reload` 生效(之后改代码也可 `/reload` 热加载)。
 
-安装后建议移除旧的 `dev-mode` 与 `pi-plan-mode` 两个安装(见「替换旧扩展」)。
-
-## 替换旧扩展
-
-新包合并了旧 `dev-mode`(只读默认 + /dev//devoff)与 `pi-plan-mode`(/plan 注入 idea.md)。安装并验证新包后:
-
-1. 卸载旧包:
-   ```bash
-   pi uninstall dev-mode
-   pi uninstall pi-plan-mode
-   ```
-   或在 `~/.pi/agent/settings.json` 的 `packages` 里删除 `../../Projects/dev-mode` 与 `../../Projects/pi-plan-mode` 两条目。
-2. `pi install ../../Projects/pi-better-develop`
-3. 确认 `~/.pi/agent/extensions/` 下无旧的 `chat-dev-mode.ts` 等自动发现文件,然后 `/reload`。
-
 ## 验证
 
-类型检查(本地已搭好 node_modules 解析环境):
+类型检查依赖本地的类型解析环境(`node_modules/` 与 `.typecheck/` 为符号链接,指向 pi 全局安装,已被 `.gitignore` 排除)。首次克隆后先补齐环境,再跑类型检查:
 
 ```bash
+pi-better-develop$ mkdir -p node_modules/@earendil-works .typecheck/node_modules/@earendil-works
+pi-better-develop$ ln -sfn /Users/ashu/.local/lib/node_modules/@earendil-works/pi-coding-agent node_modules/@earendil-works/pi-coding-agent
+pi-better-develop$ ln -sfn /Users/ashu/.local/lib/node_modules/@earendil-works/pi-coding-agent .typecheck/node_modules/@earendil-works/pi-coding-agent
+pi-better-develop$ ln -sfn /Users/ashu/.local/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox node_modules/typebox
 pi-better-develop$ npm run typecheck
 ```
 
@@ -76,4 +65,4 @@ pi-better-develop/
 ## 参考
 
 - 文档:`docs/extensions.md`(`setActiveTools`、`registerCommand`、`registerTool`、`before_agent_start` 系统提示注入)
-- 参考示例:`examples/extensions/plan-mode/`、`examples/extensions/tools.ts`、`examples/extensions/dynamic-tools.ts`
+- 参考示例(pi SDK 自带):`examples/extensions/plan-mode/`、`examples/extensions/tools.ts`、`examples/extensions/dynamic-tools.ts`

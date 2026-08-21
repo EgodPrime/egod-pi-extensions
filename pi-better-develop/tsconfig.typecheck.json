@@ -7,7 +7,7 @@
     "noEmit": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "types": ["node"]
+    "types": []
   },
   "include": ["index.ts", ".typecheck/node_modules/@earendil-works/**/*.d.ts"]
 }

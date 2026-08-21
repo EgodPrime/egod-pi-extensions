@@ -1,8 +1,7 @@
 /**
  * pi-better-develop
  *
- * A pi extension that merges the old "dev-mode" and "pi-plan-mode" extensions
- * into one package with THREE mutually-exclusive work modes:
+ * A pi extension providing THREE mutually-exclusive work modes:
  *
  *   chat (default)  — READ-ONLY. Built-in edit/write are disabled; bash stays
  *                     available but is only discouraged (via system-prompt note,
@@ -15,11 +14,10 @@
  *
  * Command surface:
  *   /chat   — leave dev or plan, back to the default read-only chat mode.
- *             Replaces the old /devoff and /plan end.
  *   /plan   — enter plan mode (write only .pi/plans).
  *   /dev    — enter dev mode (full write).
  *
- * Design notes (inherited from dev-mode, hardened after field reports):
+ * Design notes (hardened after field reports):
  *   - `mode` is a single union state: "chat" | "plan" | "dev".
  *   - Action methods (setActiveTools) are only called inside event/command
  *     handlers, NEVER during extension loading (avoids "Runtime not
@@ -40,7 +38,7 @@
  * Or test directly: pi -e ./index.ts
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
@@ -66,16 +64,39 @@ export default function (pi: ExtensionAPI) {
   const ideaPath = resolve(here, "assets/idea.md");
   let planContext = "";
 
-  void loadPlanContext();
+  // Lazy-load plan context ON DEMAND (memoized promise) instead of fire-and-forget
+  // at load time. This removes the race where /plan could be entered before the
+  // async read resolved, leaving planContext empty for the first plan turn.
+  let planContextPromise: Promise<void> | undefined;
   async function loadPlanContext(): Promise<void> {
-    try {
-      planContext = await readFile(ideaPath, "utf8");
-    } catch {
-      planContext = `[plan mode] 未找到 idea.md: ${ideaPath}`;
+    if (!planContextPromise) {
+      planContextPromise = (async () => {
+        try {
+          planContext = await readFile(ideaPath, "utf8");
+        } catch {
+          planContext = `[plan mode] 未找到 idea.md: ${ideaPath}`;
+        }
+      })();
+    }
+    return planContextPromise;
+  }
+  async function ensurePlanContext(): Promise<void> {
+    if (mode === "plan" && !planContext && !planContextPromise) {
+      await loadPlanContext();
     }
   }
 
   // ---- tool-set helpers (idempotent, callable only after runtime init) ----
+
+  /** Resolve true when the path exists (including a broken symlink). */
+  async function exists(p: string): Promise<boolean> {
+    try {
+      await access(p);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   function applyChatTools(): void {
     pi.setActiveTools(
@@ -199,7 +220,8 @@ It is a hard habit: never leave a plan file's Check-list, status, or deviation l
     if (mode === "dev") {
       note += "\n\n" + CHECKLIST_NOTE;
     } else if (mode === "plan") {
-      note += "\n\n---\n" + planContext;
+      await ensurePlanContext(); // guarantee plan context is loaded this turn
+      if (planContext) note += "\n\n---\n" + planContext;
     }
     return { systemPrompt: event.systemPrompt + "\n\n" + note };
   });
@@ -238,14 +260,46 @@ It is a hard habit: never leave a plan file's Check-list, status, or deviation l
       }
 
       await mkdir(dirname(target), { recursive: true });
-      await writeFile(resolve(plansRoot, rel), (params as { content: string }).content, "utf8");
-      const finalPath = resolve(plansRoot, rel);
+      // Refuse to silently clobber an unrelated existing file: allow overwriting
+      // ONLY a file that already holds plausible plan content (the "revise same
+      // file" workflow), and surface an explicit replace notice so the model is
+      // never surprised by a destructive write. Empty / binary / foreign files
+      // under the plans dir are treated as untouchable.
+      const replace = await exists(target);
+      if (replace) {
+        let text: string;
+        try {
+          text = await readFile(target, "utf8");
+        } catch (e) {
+          // E.g. target is a directory or unreadable — do not clobber it.
+          throw new Error(
+            `write_plan: refusing to overwrite existing unreadable path ${relative(cwd, target)}: ${(e as Error).message}`,
+          );
+        }
+        const isPlan =
+          text.includes("# 计划") ||
+          text.includes("# Plan") ||
+          text.toLowerCase().includes("check-list") ||
+          text.toLowerCase().includes("目标") ||
+          text.toLowerCase().includes("objective");
+        if (!text.trim() || !isPlan) {
+          throw new Error(
+            `write_plan: refusing to overwrite existing non-plan file: ${relative(cwd, target)}`,
+          );
+        }
+      }
+      await writeFile(target, (params as { content: string }).content, "utf8");
 
       return {
         content: [
-          { type: "text", text: `Plan written to ${relative(cwd, finalPath)}` },
+          {
+            type: "text",
+            text: `Plan ${replace ? "overwritten" : "written"} to ${relative(cwd, target)}${
+              replace ? " (WARNING: replaced an existing plan file)" : ""
+            }`,
+          },
         ],
-        details: { path: finalPath },
+        details: { path: target, replaced: replace },
       };
     },
   });
