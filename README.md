@@ -11,7 +11,7 @@ Egod 自用的 [pi coding agent](https://github.com/earendil-works/pi-coding-age
 | 扩展 | 说明 |
 |------|------|
 | [pi-better-develop](./pi-better-develop) | 三种工作模式：`/chat`(只读)、`/plan`(仅写 `.pi/plans`)、`/dev`(完全写) |
-| [pi-mood](./pi-mood) | 情绪价值陪伴：页脚最右侧单行显示友善鼓励或常识小知识点(鼓励/知识各半，不攻击不抬杠) |
+| [pi-mood](./pi-mood) | 情绪价值陪伴：页脚最右侧单行显示友善鼓励或常识小知识点(鼓励/知识各半，不攻击不抬杠)；联动 pi-user-profile，画像启用时个性化鼓励/知识点(未装/关闭则降级) |
 | [pi-token-speed](./pi-token-speed) | 页脚状态栏实时显示生成速度(tok/s) |
 | [pi-user-profile](./pi-user-profile) | 全局持久化用户画像 + `/figureme` 问卷,注入 system prompt |
 

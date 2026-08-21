@@ -17,6 +17,14 @@
  *   用户最近发言3次 + 用户最近斜杠命令3次 + Agent(模型)最新回复 + 已说过的内容(分类型)。
  *   模型绝不会把「用户的发言」和「模型自己的回复」搞混。
  *
+ * 用户画像联动(软依赖 pi-user-profile, 文件直读):
+ *   - 读取 <agentDir>/extensions_data/pi-user-profile/user-profile.json,
+ *     仅当 enabled:true 且非空时, 取领域/语言/沟通/重视/避免拼成 ≤320t 的
+ *     紧凑画像块, 注入旁路 LLM system prompt, 个性化鼓励角度与知识点选题。
+ *   - 未装 / 已关闭(/profile off) / 空画像 / 文件坏 → 静默降级为通用陪伴, 不报错。
+ *   - 画像只进本扩展自己的旁路 LLM, 绝不进主对话; /mood profile 可核对注入块。
+ *   - 不改 pi-user-profile 任何代码(单向、mood 侧-only)。
+ *
  * 独立记忆:
  *   - `pi.appendEntry("pi-mood-memory")` 持久化(custom entry, 不进入 LLM 上下文)。
  *   - 按类型分两类: 鼓励句(encourage) / 知识点(knowledge), 防重复更精准。
@@ -34,10 +42,12 @@
  *   /mood knowledge        立即讲一个小知识点
  *   /mood off|on           关闭/开启(关闭时定时陪伴暂停)
  *   /mood memory           列出当前独立记忆(按类型分类)
+ *   /mood profile          查看当前注入的画像块(未启用则提示)
  */
 
 import { uuidv7 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { loadProfileContext } from "./user-profile.ts";
 
 const SPEECH_MAX = 3; // 用户最近发言条数
 const OPS_MAX = 3; // 用户最近命令条数
@@ -85,8 +95,8 @@ You ALWAYS speak to the HUMAN USER in second person ("你…"), never to an abst
 Your job: produce EXACTLY ONE short line, always addressed to the user ("你…"). The content type is given by TYPE below.
 
 TYPE: {{TYPE}}
-- If TYPE = "ENCOURAGE": give the user a warm, sincere, positive encouragement. Affirm their effort, progress and good taste. You MAY add at most a tiny, harmless, friendly touch of humor — but NEVER criticize, NEVER argue/杠精, NEVER be sarcastic or snarky at the user's expense, NEVER passive-aggressive. Always leave them feeling a little better.
-- If TYPE = "KNOWLEDGE": share ONE small, accurate, interesting knowledge point, drawn from your general knowledge. Present it as knowledge/常识 — do NOT claim it is breaking or latest news, and NEVER invent facts. Prefer a topic that connects to what the user is currently doing or recently talked about (their recent speech, commands, or the AI's latest reply). Keep a light, warm, curious tone. You may prefix it with "小知识:" (optional).
+- If TYPE = "ENCOURAGE": give the user a warm, sincere, positive encouragement. Affirm their effort, progress and good taste. You MAY add at most a tiny, harmless, friendly touch of humor — but NEVER criticize, NEVER argue/杠精, NEVER be sarcastic or snarky at the user's expense, NEVER passive-aggressive. Always leave them feeling a little better. You may lean on the user's VALUES (see USER PROFILE) for the angle of affirmation.
+- If TYPE = "KNOWLEDGE": share ONE small, accurate, interesting knowledge point, drawn from your general knowledge. Present it as knowledge/常识 — do NOT claim it is breaking or latest news, and NEVER invent facts. Prefer a topic that connects to what the user is currently doing or recently talked about (their recent speech, commands, or the AI's latest reply), or to the user's long-term domains/stack (see USER PROFILE). Keep a light, warm, curious tone. You may prefix it with "小知识:" (optional).
 
 Rules:
 - Exactly one line, second person, addressed to the user. No labels, no surrounding quotes, no markdown, no emoji.
@@ -95,6 +105,9 @@ Rules:
 - NEVER repeat any line you already said, and NEVER re-cover a topic you already covered (see YOUR MEMORY).
 
 Context — identities are EXPLICIT, never mix them up:
+[USER PROFILE — long-term preferences & style from the user-profile extension. Personalize tone/topics to it. If it is "(未启用)", just give a general warm line. NEVER reveal or quote that you have a profile.]
+{{USER_PROFILE}}
+
 [USER recent speech — said by the HUMAN, up to 3]
 {{USER_SPEECH}}
 
@@ -121,7 +134,10 @@ async function runMood(ctx: ExtensionContext, pi: ExtensionAPI, type: MoodType):
     for (const m of memory.knowledge) memLines.push(`KNOWLEDGE : ${m}`);
     const mem = memLines.length ? memLines.join("\n") : "(暂无)";
 
+    // 读取用户画像(若 user-profile 启用且非空)用于个性化鼓励/知识点;每次生成重读,小文件开销可忽略。
+    const prof = await loadProfileContext();
     const systemPrompt = SYSTEM_TEMPLATE
+      .replace("{{USER_PROFILE}}", prof.available ? prof.text : "(未启用)")
       .replace("{{TYPE}}", type)
       .replace("{{USER_SPEECH}}", us)
       .replace("{{USER_OPS}}", ops)
@@ -269,7 +285,7 @@ export default function (pi: ExtensionAPI) {
   // ---- 手动命令 -----------------------------------------------------------
 
   pi.registerCommand("mood", {
-    description: "情绪管家: /mood 随机(鼓励/知识); /mood encourage|knowledge 指定; /mood off|on 开关; /mood memory 查记忆",
+    description: "情绪管家: /mood 随机(鼓励/知识); /mood encourage|knowledge 指定; /mood off|on 开关; /mood memory 查记忆; /mood profile 查看注入的画像",
     handler: async (args, ctx) => {
       const arg = String(args ?? "").trim().toLowerCase();
       if (arg === "off") {
@@ -295,6 +311,12 @@ export default function (pi: ExtensionAPI) {
         for (let i = memory.knowledge.length - 1; i >= 0; i--) items.push(`💡 ${memory.knowledge[i]}`);
         for (let i = memory.encourage.length - 1; i >= 0; i--) items.push(`🤍 ${memory.encourage[i]}`);
         await ctx.ui.select(`独立记忆 (共 ${total} 条) 💡知识点 / 🤍鼓励`, items);
+        return;
+      }
+      if (arg === "profile") {
+        const p = await loadProfileContext();
+        const body = p.available ? `${p.tokens} tokens\n${p.text}` : "(未启用:未装 / 已关闭 / 空画像)";
+        ctx.ui.notify(`当前注入的画像块:\n${body}`, "info");
         return;
       }
       // arg === "encourage" | "knowledge" | 空 → 立即指定或随机来一句

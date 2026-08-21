@@ -5,9 +5,10 @@
     "moduleResolution": "NodeNext",
     "strict": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "types": []
   },
-  "include": ["index.ts", ".typecheck/node_modules/@earendil-works/**/*.d.ts"]
+  "include": ["index.ts", "user-profile.ts", ".typecheck/node_modules/@earendil-works/**/*.d.ts"]
 }
