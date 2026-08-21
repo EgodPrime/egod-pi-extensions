@@ -17,6 +17,14 @@
  *   用户最近发言3次 + 用户最近斜杠命令3次 + Agent(模型)最新回复 + 已说过的内容(分类型)。
  *   模型绝不会把「用户的发言」和「模型自己的回复」搞混。
  *
+ * 用户画像联动(软依赖 pi-user-profile, 文件直读):
+ *   - 读取 <agentDir>/extensions_data/pi-user-profile/user-profile.json,
+ *     仅当 enabled:true 且非空时, 取领域/语言/沟通/重视/避免拼成 ≤320t 的
+ *     紧凑画像块, 注入旁路 LLM system prompt, 个性化鼓励角度与知识点选题。
+ *   - 未装 / 已关闭(/profile off) / 空画像 / 文件坏 → 静默降级为通用陪伴, 不报错。
+ *   - 画像只进本扩展自己的旁路 LLM, 绝不进主对话; /mood profile 可核对注入块。
+ *   - 不改 pi-user-profile 任何代码(单向、mood 侧-only)。
+ *
  * 独立记忆:
  *   - `pi.appendEntry("pi-mood-memory")` 持久化(custom entry, 不进入 LLM 上下文)。
  *   - 按类型分两类: 鼓励句(encourage) / 知识点(knowledge), 防重复更精准。
